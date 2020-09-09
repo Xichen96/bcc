@@ -53,6 +53,8 @@ enum {
   DEBUG_BPF_REGISTER_STATE = 0x10,
   // Debug BTF.
   DEBUG_BTF = 0x20,
+  // output elf
+  ELF_OUT,
 };
 
 class TableDesc;
@@ -71,7 +73,7 @@ class BPFModule {
   void initialize_rw_engine();
   void cleanup_rw_engine();
   int parse(llvm::Module *mod);
-  int finalize();
+  int finalize(const std::string &path="");
   int annotate();
   void annotate_light();
   std::unique_ptr<llvm::ExecutionEngine> finalize_rw(std::unique_ptr<llvm::Module> mod);
@@ -99,9 +101,9 @@ class BPFModule {
             const char *dev_name = nullptr);
   ~BPFModule();
   int free_bcc_memory();
-  int load_b(const std::string &filename, const std::string &proto_filename);
-  int load_c(const std::string &filename, const char *cflags[], int ncflags);
-  int load_string(const std::string &text, const char *cflags[], int ncflags);
+  int load_b(const std::string &filename, const std::string &proto_filename, const std::string &elf_path="");
+  int load_c(const std::string &filename, const char *cflags[], int ncflags, const std::string &elf_path="");
+  int load_string(const std::string &text, const char *cflags[], int ncflags, const std::string &elf_path="");
   std::string id() const { return id_; }
   std::string maps_ns() const { return maps_ns_; }
   size_t num_functions() const;

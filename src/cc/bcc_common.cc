@@ -47,6 +47,41 @@ void * bpf_module_create_c_from_string(const char *text, unsigned flags, const c
   return mod;
 }
 
+int bpf_elf_create_b(const char *filename, const char *proto_filename, unsigned flags,
+                           const char *dev_name, const char *elf_path) {
+  auto mod = new ebpf::BPFModule(flags, nullptr, true, "", true, dev_name);
+  if (mod->load_b(filename, proto_filename, std::string(elf_path)) != 0) {
+    delete mod;
+    return -1;
+  }
+  delete mod;
+  return 0;
+}
+
+int bpf_elf_create_c(const char *filename, unsigned flags, const char *cflags[],
+                           int ncflags, bool allow_rlimit, const char *dev_name,
+			   const char *elf_path) {
+  auto mod = new ebpf::BPFModule(flags, nullptr, true, "", allow_rlimit, dev_name);
+  if (mod->load_c(filename, cflags, ncflags, std::string(elf_path)) != 0) {
+    delete mod;
+    return -1;
+  }
+  delete mod;
+  return 0;
+}
+
+int bpf_elf_create_c_from_string(const char *text, unsigned flags, const char *cflags[],
+                                       int ncflags, bool allow_rlimit, const char *dev_name,
+				       const char *elf_path) {
+  auto mod = new ebpf::BPFModule(flags, nullptr, true, "", allow_rlimit, dev_name);
+  if (mod->load_string(text, cflags, ncflags, std::string(elf_path)) != 0) {
+    delete mod;
+    return -1;
+  }
+  delete mod;
+  return 0;
+}
+
 void bpf_module_destroy(void *program) {
   auto mod = static_cast<ebpf::BPFModule *>(program);
   if (!mod) return;

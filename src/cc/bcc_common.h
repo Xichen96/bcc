@@ -32,6 +32,13 @@ void * bpf_module_create_c(const char *filename, unsigned flags, const char *cfl
 void * bpf_module_create_c_from_string(const char *text, unsigned flags, const char *cflags[],
                                        int ncflags, bool allow_rlimit,
                                        const char *dev_name);
+int bpf_elf_create_b(const char *filename, const char *proto_filename, unsigned flags,
+                           const char *dev_name, const char *elf_path);
+int bpf_elf_create_c(const char *filename, unsigned flags, const char *cflags[], int ncflags,
+                           bool allow_rlimit, const char *dev_name, const char *elf_path);
+int bpf_elf_create_c_from_string(const char *text, unsigned flags, const char *cflags[],
+                                       int ncflags, bool allow_rlimit,
+                                       const char *dev_name, const char *elf_path);
 void bpf_module_destroy(void *program);
 char * bpf_module_license(void *program);
 unsigned bpf_module_kern_version(void *program);

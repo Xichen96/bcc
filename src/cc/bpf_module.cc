@@ -47,6 +47,12 @@
 #include "bcc_btf.h"
 #include "bcc_libbpf_inc.h"
 
+#include <libelf.h>
+#include <err.h>
+#include <sysexits.h>
+#include <iostream>
+#include <stdlib.h>
+
 namespace ebpf {
 
 using std::get;
@@ -92,6 +98,242 @@ class MyMemoryManager : public SectionMemoryManager {
     return Addr;
   }
   sec_map_def *sections_;
+};
+
+class ELFMemoryManager : public MyMemoryManager {
+ public:
+
+  explicit ELFMemoryManager(sec_map_def *sections, string path, ELFMemoryManager **ptr)
+      : MyMemoryManager(sections),
+	path_(path) {
+    *ptr = this;
+    if (elf_version(EV_CURRENT) == EV_NONE)
+      errx(EX_SOFTWARE, "ELF library initialization failed: %s", elf_errmsg(-1));
+    if ((fd = open(path_.c_str(), O_WRONLY | O_CREAT, 0777)) < 0)
+      err(EX_OSERR, "open %s failed", path_.c_str());
+    if ((e = elf_begin(fd, ELF_C_WRITE, NULL)) == NULL)
+      errx(EX_SOFTWARE, "elf_begin() failed: %s.", elf_errmsg(-1));
+    if ((ehdr = elf64_newehdr(e)) == NULL)
+      errx(EX_SOFTWARE, "elf64_newehdr() failed: %s.", elf_errmsg(-1));
+    ehdr->e_type = ET_REL;
+    ehdr->e_machine = EM_BPF;
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+    ehdr->e_ident[EI_DATA] = ELFDATA2LSB;
+#elif __BYTE_ORDER == __BIG_ENDIAN
+    ehdr->e_ident[EI_DATA] = ELFDATA2MSB;
+#else
+# error "Unrecognized __BYT_ORDER"
+#endif
+  }
+
+  virtual ~ELFMemoryManager() {}
+  uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment,
+                               unsigned SectionID,
+                               StringRef SectionName) override {
+    std::cout << SectionID << ": " << SectionName.str() << std::endl;
+    if (SectionName.equals("")) {
+      SectionIDOffset -= 1;
+      return MyMemoryManager::allocateCodeSection(Size, Alignment, SectionID, SectionName); 
+    }
+    Elf_Scn *scn;
+    Elf_Data *data;
+    Elf64_Shdr *shdr;
+    if ((scn = elf_newscn(e)) == NULL)
+      errx(EX_SOFTWARE, "elf_newscn() failed: %s.", elf_errmsg(-1));
+    if ((data = elf_newdata(scn)) == NULL)
+      errx(EX_SOFTWARE, "elf_newdata() failed: %s.", elf_errmsg(-1));
+    data->d_align = Alignment;
+    data->d_buf = MyMemoryManager::allocateCodeSection(Size, Alignment, SectionID, SectionName);
+    data->d_size = Size;
+    data->d_version = EV_CURRENT;
+    if ((shdr = elf64_getshdr(scn)) == NULL)
+      errx(EX_SOFTWARE, "elf64_getshdr() failed: %s.", elf_errmsg(-1));
+    shdrs[SectionName.str()] = shdr;
+    name_ids[SectionName.str()] = SectionID + SectionIDOffset;
+    if (SectionName.equals(".symtab")) {
+      symtab = (uint8_t *) data->d_buf;
+      symtab_size = Size;
+      symtab_id = SectionID + SectionIDOffset;
+      symtab_shdr = shdr;
+      shdr->sh_type = SHT_SYMTAB;
+      shdr->sh_entsize = 24;
+    } else if (SectionName.equals(".strtab")) {
+      strtab = (uint8_t *) data->d_buf;
+      strtab_size = Size;
+      strtab_id = SectionID + SectionIDOffset;
+      shdr->sh_type = SHT_STRTAB;
+      ehdr->e_shstrndx = elf_ndxscn(scn);
+    } else if (SectionName.startswith(".rel")) {
+      shdr->sh_type = SHT_REL;
+      shdr->sh_entsize = 16;
+      rel_shdrs[SectionName.str()] = shdr;
+    } else if (SectionName.size() > 0) {
+      shdr->sh_type = SHT_PROGBITS;
+      /*
+      if (SectionName.equals("helpers")) {
+      } else*/
+      if (SectionName.equals(".eh_frame")) {
+        shdr->sh_flags = SHF_ALLOC;
+      } else if (SectionName.equals(".debug_str")) {
+        shdr->sh_flags = SHF_MERGE | SHF_STRINGS;
+	shdr->sh_entsize = 1;
+      } else if (SectionName.equals("license")) {
+        shdr->sh_flags = SHF_WRITE | SHF_ALLOC;
+      } else if (SectionName.startswith("maps")) {
+        shdr->sh_flags = SHF_WRITE | SHF_ALLOC;
+      } else if (SectionName.startswith(".maps.")) {
+        shdr->sh_flags = SHF_WRITE | SHF_ALLOC;
+      } else {
+        shdr->sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+	if (SectionName.equals(".text")) {
+	  data->d_size = 0;
+	}
+      }
+    }
+    shdr->sh_addralign = Alignment;
+    return (uint8_t *) data->d_buf;
+  }
+  uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
+                               unsigned SectionID, StringRef SectionName,
+                               bool isReadOnly) override {
+    std::cout << SectionID << ": " << SectionName.str() << std::endl;
+    if (SectionName.equals("")) {
+      SectionIDOffset -= 1;
+      return MyMemoryManager::allocateDataSection(Size, Alignment, SectionID, SectionName, isReadOnly); 
+    }
+    Elf_Scn *scn;
+    Elf_Data *data;
+    Elf64_Shdr *shdr;
+    if ((scn = elf_newscn(e)) == NULL)
+      errx(EX_SOFTWARE, "elf_newscn() failed: %s.", elf_errmsg(-1));
+    if ((data = elf_newdata(scn)) == NULL)
+      errx(EX_SOFTWARE, "elf_newdata() failed: %s.", elf_errmsg(-1));
+    data->d_align = Alignment;
+    data->d_buf = MyMemoryManager::allocateDataSection(Size, Alignment, SectionID, SectionName, isReadOnly);
+    data->d_size = Size;
+    data->d_version = EV_CURRENT;
+    if ((shdr = elf64_getshdr(scn)) == NULL)
+      errx(EX_SOFTWARE, "elf64_getshdr() failed: %s.", elf_errmsg(-1));
+    shdrs[SectionName.str()] = shdr;
+    name_ids[SectionName.str()] = SectionID + SectionIDOffset;
+    if (SectionName.equals(".symtab")) {
+      symtab = (uint8_t *) data->d_buf;
+      symtab_size = Size;
+      symtab_id = SectionID + SectionIDOffset;
+      symtab_shdr = shdr;
+      shdr->sh_type = SHT_SYMTAB;
+      shdr->sh_entsize = 24;
+    } else if (SectionName.equals(".strtab")) {
+      strtab = (uint8_t *) data->d_buf;
+      strtab_size = Size;
+      strtab_id = SectionID + SectionIDOffset;
+      shdr->sh_type = SHT_STRTAB;
+      ehdr->e_shstrndx = elf_ndxscn(scn);
+    } else if (SectionName.startswith(".rel")) {
+      shdr->sh_type = SHT_REL;
+      shdr->sh_entsize = 16;
+      rel_shdrs[SectionName.str()] = shdr;
+    } else if (SectionName.size() > 0) {
+      shdr->sh_type = SHT_PROGBITS;
+      if (SectionName.equals(".eh_frame")) {
+        shdr->sh_flags = SHF_ALLOC;
+      } else if (SectionName.equals(".debug_str")) {
+        shdr->sh_flags = SHF_MERGE | SHF_STRINGS;
+	shdr->sh_entsize = 1;
+      } else if (SectionName.equals("license")) {
+        shdr->sh_flags = SHF_WRITE | SHF_ALLOC;
+      } else if (SectionName.startswith("maps")) {
+        shdr->sh_flags = SHF_WRITE | SHF_ALLOC;
+      } else if (SectionName.startswith(".maps.")) {
+        shdr->sh_flags = SHF_WRITE | SHF_ALLOC;
+      } else {
+        //shdr->sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+      }
+    }
+    shdr->sh_addralign = Alignment;
+    return (uint8_t *) data->d_buf;
+  }
+  bool finalizeMemory(std::string *ErrMsg=nullptr) override {
+    return MyMemoryManager::finalizeMemory(ErrMsg);
+  }
+  bool generateELF() {
+    map<string, unsigned> func_offset = map<string, unsigned>();
+    map<string, unsigned> map_offset = map<string, unsigned>();
+    uintptr_t rest = strtab_size;
+    auto strptr = strtab;
+    while (rest > 0) {
+      if (strptr[0] != 0) {
+        string name = string((const char *) strptr);
+        auto shdr_iter = shdrs.find(name);
+        if (shdr_iter != shdrs.end()) {
+          shdr_iter->second->sh_name = strtab_size - rest;
+	  if (name.rfind(".bpf.fn.", 0) == 0) {
+	    func_offset[name] = strtab_size - rest;
+	  }
+	  if (name.rfind(".maps.", 0) == 0) {
+	    map_offset[name] = strtab_size - rest;
+	  }
+        } else {
+          //std::cout << "entry " << name << " at " << strtab_size - rest << " has no match in shdr" << std::endl;
+        }
+      }
+      rest -= 1;
+      strptr += 1;
+    }
+    for (auto const& iter : rel_shdrs) {
+      iter.second->sh_link = symtab_id;
+      iter.second->sh_info = name_ids[iter.first.substr(4)];
+    }
+    symtab_shdr->sh_link = strtab_id;
+    if (elf_update(e, ELF_C_NULL) < 0)
+      errx(EX_SOFTWARE, "elf_update(NULL) failed: %s.", elf_errmsg(-1));
+    rest = symtab_size;
+    while (rest > 0) {
+      Elf64_Sym *sym = (Elf64_Sym *) symtab;
+      const char *name_ptr = (const char *) strtab + sym->st_name;
+      string name = string(name_ptr);
+      for (auto iter : name_ids) {
+        std::cout << iter.first << ": " << iter.second << std::endl;
+      }
+      auto iter = func_offset.find(".bpf.fn." + name);
+      if (iter != func_offset.end()) {
+        sym->st_name = iter->second;
+        sym->st_shndx = name_ids[".bpf.fn." + name];
+      }
+      iter = map_offset.find(".maps." + name);
+      if (iter != map_offset.end()) {
+        sym->st_name = iter->second;
+	sym->st_shndx = name_ids[".maps." + name];
+      }
+      if (name.compare("bpf_tail_call") == 0) {
+        sym->st_shndx = name_ids["helpers"];
+      }
+      rest -= sizeof(Elf64_Sym);
+      symtab += sizeof(Elf64_Sym);
+    }
+    if (elf_update(e, ELF_C_WRITE) < 0) {
+      errx(EX_SOFTWARE, "elf_update() failed: %s.", elf_errmsg(-1));
+    }
+    elf_end(e);
+    close(fd);
+    return false;
+  }
+  string path_;
+ private:
+  int SectionIDOffset = 1;
+  int fd;
+  Elf *e;
+  Elf64_Ehdr *ehdr;
+  unsigned strtab_id;
+  uint8_t *strtab;
+  uintptr_t strtab_size;
+  unsigned symtab_id;
+  uint8_t *symtab;
+  uintptr_t symtab_size;
+  Elf64_Shdr *symtab_shdr;
+  map<string, Elf64_Shdr *> shdrs = map<string, Elf64_Shdr *>();
+  map<string, unsigned> name_ids = map<string, unsigned>();
+  map<string, Elf64_Shdr *> rel_shdrs = map<string, Elf64_Shdr *>();
 };
 
 BPFModule::BPFModule(unsigned flags, TableStorage *ts, bool rw_engine_enabled,
@@ -440,7 +682,7 @@ int BPFModule::load_maps(sec_map_def &sections) {
   return 0;
 }
 
-int BPFModule::finalize() {
+int BPFModule::finalize(const std::string &path) {
   Module *mod = &*mod_;
   sec_map_def tmp_sections,
       *sections_p;
@@ -464,7 +706,23 @@ int BPFModule::finalize() {
   string err;
   EngineBuilder builder(move(mod_));
   builder.setErrorStr(&err);
-  builder.setMCJITMemoryManager(ebpf::make_unique<MyMemoryManager>(sections_p));
+  /*
+  std::unique_ptr<MyMemoryManager> mmm;
+  std::unique_ptr<ELFMemoryManager> emm;
+  if (path == "") {
+    mmm = ebpf::make_unique<MyMemoryManager>(sections_p);
+    builder.setMCJITMemoryManager(mmm);
+  } else {
+    emm = ebpf::make_unique<ELFMemoryManager>(sections_p, path);
+    builder.setMCJITMemoryManager(emm);
+  }
+  */
+  ELFMemoryManager *mm_ptr;
+  if (path == "") {
+    builder.setMCJITMemoryManager(ebpf::make_unique<MyMemoryManager>(sections_p));
+  } else {
+    builder.setMCJITMemoryManager(ebpf::make_unique<ELFMemoryManager>(sections_p, path, &mm_ptr));
+  }
   builder.setMArch("bpf");
   builder.setUseOrcMCJITReplacement(false);
   engine_ = unique_ptr<ExecutionEngine>(builder.create());
@@ -490,8 +748,15 @@ int BPFModule::finalize() {
                                 src_dbg_fmap_);
     src_debugger.dump();
   }
-
+ 
   load_btf(*sections_p);
+
+  // if we are outputing an elf, no point in loading it
+  if (path != "") {
+    mm_ptr->generateELF();
+    return 0;
+  }
+
   if (load_maps(*sections_p))
     return -1;
 
@@ -822,7 +1087,7 @@ int BPFModule::table_leaf_scanf(size_t id, const char *leaf_str, void *leaf) {
 }
 
 // load a B file, which comes in two parts
-int BPFModule::load_b(const string &filename, const string &proto_filename) {
+int BPFModule::load_b(const string &filename, const string &proto_filename, const std::string &elf_path) {
   if (!sections_.empty()) {
     fprintf(stderr, "Program already initialized\n");
     return -1;
@@ -853,13 +1118,13 @@ int BPFModule::load_b(const string &filename, const string &proto_filename) {
   } else {
     annotate_light();
   }
-  if (int rc = finalize())
+  if (int rc = finalize(elf_path))
     return rc;
   return 0;
 }
 
 // load a C file
-int BPFModule::load_c(const string &filename, const char *cflags[], int ncflags) {
+int BPFModule::load_c(const string &filename, const char *cflags[], int ncflags, const std::string &elf_path) {
   if (!sections_.empty()) {
     fprintf(stderr, "Program already initialized\n");
     return -1;
@@ -876,13 +1141,13 @@ int BPFModule::load_c(const string &filename, const char *cflags[], int ncflags)
   } else {
     annotate_light();
   }
-  if (int rc = finalize())
+  if (int rc = finalize(elf_path))
     return rc;
   return 0;
 }
 
 // load a C text string
-int BPFModule::load_string(const string &text, const char *cflags[], int ncflags) {
+int BPFModule::load_string(const string &text, const char *cflags[], int ncflags, const std::string &elf_path) {
   if (!sections_.empty()) {
     fprintf(stderr, "Program already initialized\n");
     return -1;
@@ -896,7 +1161,7 @@ int BPFModule::load_string(const string &text, const char *cflags[], int ncflags
     annotate_light();
   }
 
-  if (int rc = finalize())
+  if (int rc = finalize(elf_path))
     return rc;
   return 0;
 }
